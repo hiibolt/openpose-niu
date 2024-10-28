@@ -1,11 +1,11 @@
 mod fs;
 mod metis;
 
-use crate::metis::{ PBSId, metis_qsub };
+use crate::metis::{ PBSId, metis_qsub, metis_output_exists };
 use crate::fs::{ SSHPath, copy_file, move_to_send }; 
 
 use anyhow::{ Context, Result };
-
+use tokio::time::{ sleep, Duration };
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,6 +59,21 @@ async fn main() -> Result<()> {
         .context("Couldn't run `qsub` on Metis!")?;
 
     println!("Job ID: '{}'", pbs_id);
+
+    // [ Output Await ]
+    while !metis_output_exists(
+                username,
+                hostname,
+                &sha256,
+                "meow"
+            ).await
+                .context("Failed to check existence of file on Metis!")?
+    {
+        println!("File does not exist! Trying again in 5 seconds.");
+        sleep(Duration::from_secs(5)).await;
+    }
+
+    println!("File exists! :3");
 
     Ok(())
 }
