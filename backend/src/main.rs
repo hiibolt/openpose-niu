@@ -12,10 +12,12 @@ async fn main() -> Result<()> {
     let username: &str = "z1994244";
     let hostname: &str = "metis.niu.edu";
 
-    let metis_pbs_path:    &str = "/lstr/sahara/zwlab/jw/openpose-api/run.pbs";
-    let metis_inputs_path: &str = "/lstr/sahara/zwlab/jw/openpose-api/inputs";
+    let metis_pbs_path:     &str = "/lstr/sahara/zwlab/jw/openpose-api/run.pbs";
+    let metis_inputs_path:  &str = "/lstr/sahara/zwlab/jw/openpose-api/inputs";
+    let metis_outputs_path: &str = "/lstr/sahara/zwlab/jw/openpose-api/outputs";
     
     let local_to_send_dir:    &str = "./assets/to_send";
+    let local_to_serve_dir:   &str = "./assets/to_serve";
     let local_pbs_path:       &str = "./assets/run.pbs";
     let local_test_file_path: &str = "meow.txt";
 
@@ -65,7 +67,7 @@ async fn main() -> Result<()> {
                 username,
                 hostname,
                 &sha256,
-                "meow"
+                &extension
             ).await
                 .context("Failed to check existence of file on Metis!")?
     {
@@ -74,6 +76,26 @@ async fn main() -> Result<()> {
     }
 
     println!("File exists! :3");
+
+    // [ Output Retrieval ]
+    // First, create the directory if it doesn't exist
+    let output_to_serve_path = format!("{}/{}", local_to_serve_dir, sha256);
+    if !tokio::fs::try_exists( &output_to_serve_path )
+            .await.unwrap_or(false)
+    {
+        tokio::fs::create_dir( &output_to_serve_path )
+            .await
+            .context("Failed to create output directory locally! Does it exist?")?;
+    }
+
+    copy_file(
+        username,
+        hostname,
+
+        SSHPath::Remote( &format!("{}/{}/output.{}", metis_outputs_path, sha256, extension) ),
+        SSHPath::Local( &format!("{}/output.{}", output_to_serve_path, extension) )
+    ).await
+        .context("Could not copy file back to host!")?;
 
     Ok(())
 }

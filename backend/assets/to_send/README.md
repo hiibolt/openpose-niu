@@ -1,1 +1,1 @@
-# Used for files which have yet to be sent to Metis
+# Holds files which are about to be sent to Metis
