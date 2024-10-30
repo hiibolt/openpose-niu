@@ -1,119 +1,137 @@
 use tokio::process::Command;
-use anyhow::{ bail, Context, Result, anyhow };
+use anyhow::{ bail, Context, Result };
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use sha2::{ Sha256, Digest };
+use tracing::warn;
 
-/// Moves a file to the `to_send` folder by calculating and 
-///  changing the name to be the SHA256 hash of the contents.
+/// Digests a byte vector into a string representation
+///  of a SHA256 hash.
 ///
 /// # Args
-/// The (full) filename you would like to move
+/// * `bytes`: The byte vector to digest.
 ///
 /// # Returns
-/// The new filename and the extension.
-pub async fn move_to_send (
-    file: &str
-) -> Result<(String, String)> {
-    let file_path_str = format!("./assets/to_process/{}", file);
-    let file_path = Path::new(&file_path_str);
+/// * A stringified SHA256 digest of the byte vector.
+pub fn sha256_digest_bytes (
+    bytes: &Vec<u8>
+) -> String {
+    let mut hasher = Sha256::new();
+
+    hasher.update( bytes );
+
+    // The result comes out as hexadecimal, so we must
+    //  convert it
+    format!( "{:x}", hasher.finalize( ))
+}
+
+/// Moves a file from `from_path` to `to_path`.
+///
+/// # Args
+/// * `from_path`: The path to the original file
+/// * `to_path`: The path to the new file
+///
+/// # Notes
+/// * Returns okay if the file already exists, doesn't
+///    check the file's contents. Accordingly, pair with
+///    a hashing function of some kind.
+pub async fn move_file (
+    from_path_str: &str,
+    to_path_str:   &str
+) -> Result<()> {
+    // It's rather difficult to use a `&Path` upfront
+    let from_path: &Path = Path::new( from_path_str );
+    let to_path:   &Path = Path::new( to_path_str   );
 
     // Read the file contents
-    let bytes: Vec<u8> = tokio::fs::read ( file_path )
+    let byte_vec: Vec<u8> = tokio::fs::read ( from_path )
         .await
         .context("Couldn't read the source file!")?;
 
     // Delete the file
-    tokio::fs::remove_file( Path::new( file_path ) )
+    tokio::fs::remove_file( from_path )
         .await
         .context("Failed to remove source file!")?;
 
-    // Create our hash
-    let mut hasher = Sha256::new();
-    hasher.update(bytes.clone());
-    let sha256 = format!("{:x}", hasher.finalize());
-
-    // Get the file's extension
-    let extension: &str = file_path.extension()
-        .ok_or(anyhow!("File did not have extension!"))?
-        .to_str()
-        .ok_or(anyhow!("File's extension was not valid Unicode!"))?;
-
-    // Determine the new filename
-    let new_file_name = format!("{}.{}", sha256, extension);
-    let new_file_path_str: String = format!("./assets/to_send/{}", new_file_name);
-    let new_file_path: &Path = Path::new(&new_file_path_str);
-
     // Check if that filename already exists
-    if tokio::fs::try_exists ( new_file_path )
+    if tokio::fs::try_exists ( to_path )
         .await.unwrap_or(false)
     {
-        println!("File already exists cryptographically with the same extension, skipping!");
+        warn!("File already exists, skipping!");
 
-        return Ok((sha256, extension.into()));
+        return Ok(());
     }
 
     // Create the new file path
-    let mut new_file = File::create( new_file_path )
+    let mut to_file = File::create( to_path )
         .await
         .context("Couldn't create the new file!")?;
 
     // Write the contents back to it and flush
-    new_file.write(&bytes)
+    to_file.write(&byte_vec)
         .await
         .context("Couldn't write contents to the new file!")?;
-    new_file.flush()
+    to_file.flush()
         .await
         .context("Couln't flush contents to the new file!")?;
 
-    Ok((sha256, extension.into()))
+    Ok(())
 }
 pub enum SSHPath<'a> {
-    Local(&'a str),
-    Remote(&'a str)
+    Local  (&'a str),
+    Remote (&'a str)
 }
 pub async fn copy_file<'a> (
     username:         &str,
     hostname:         &str,
 
     source:           SSHPath<'a>,
-    destination:      SSHPath<'a>
+    destination:      SSHPath<'a>,
+    directory:        bool
 ) -> Result<String> {
-    let output;
+    let mut command = Command::new("scp");
+
+    if directory {
+        command.arg("-r");
+    }
+
     match source {
         SSHPath::Remote(remote_file_path) => {
-            if let SSHPath::Local(local_file_path) = destination {
-                output = Command::new("scp")
-                    .arg(&format!("{username}@{hostname}:{}", remote_file_path ))
-                    .arg(local_file_path)
-                    .output()
-                    .await
-                    .context("Failed to execute `scp` command!")?;
-            } else {
-                bail!("Must have differing SSHPath types!");
+            match destination {
+                SSHPath::Local(local_file_path) => {
+                    command
+                        .arg(format!("{username}@{hostname}:{}", remote_file_path ))
+                        .arg(local_file_path);
+                },
+                SSHPath::Remote(new_remote_file_path) => {
+                    command
+                        .arg(format!("{username}@{hostname}:{}", remote_file_path ))
+                        .arg(format!("{username}@{hostname}:{}", new_remote_file_path ));
+                }
             }
         },
         SSHPath::Local(local_file_path) => {
             if let SSHPath::Remote(remote_file_path) = destination {
-                output = Command::new("scp")
+                command
                     .arg(local_file_path)
-                    .arg(&format!("{username}@{hostname}:{}", remote_file_path))
-                    .output()
-                    .await
-                    .context("Failed to execute `scp` command!")?;
+                    .arg(format!("{username}@{hostname}:{}", remote_file_path));
             } else {
                 bail!("Must have differing SSHPath types!");
             }
         }
     }
 
+    let output = command.output()
+        .await
+        .context("Failed to execute `scp` command!")?;
+
     let stdout: String = String::from_utf8 ( output.stdout )
         .context("Standard output contained invalid UTF-8!")?;
     let stderr: String = String::from_utf8 ( output.stderr )
         .context("Standard error contained invalid UTF-8!")?;
 
-    if stderr.len() > 0 {
+    if !stderr.is_empty() {
         bail!("Got error output: {stderr}");
     }
 

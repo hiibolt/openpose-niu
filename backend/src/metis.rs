@@ -1,14 +1,20 @@
 
-use anyhow::{ bail, Context, Result };
+use anyhow::{ bail, Context, Result, anyhow };
 use openssh::{ Session, KnownHosts };
 
 pub async fn metis_output_exists (
     username:  &str,
     hostname:  &str,
 
-    hash:      &str,
-    extension: &str
+    pbs_job_id:   &str,
+    pbs_job_name: &str
 ) -> Result<bool> {
+    // Extract the job number since there's additional information in the job ID
+    let pbs_job_number = pbs_job_id
+        .split('.')
+        .next()
+        .ok_or(anyhow!("Missing job number! Ensure the Job ID is in the form <n>.cm!"))?;
+
     // Attempt to connect to METIS
     let session = Session::connect_mux(&format!("{username}@{hostname}"), KnownHosts::Strict)
         .await
@@ -17,7 +23,7 @@ pub async fn metis_output_exists (
     // Add our path and run the command
     let output = session
         .command("ls")
-        .arg(&format!("/lstr/sahara/zwlab/jw/openpose-api/outputs/{hash}/output.{extension}"))
+        .arg(format!("{pbs_job_name}.o{pbs_job_number}"))
         .output().await
         .context("Failed to run openpose command!")?;
 
@@ -27,14 +33,12 @@ pub async fn metis_output_exists (
     let stderr = String::from_utf8(output.stderr)
         .context("Server `stderr` was not valid UTF-8")?;
 
-    let ret = if stderr.len() > 0 { false } else { true };
-
     // Close the SSH session
     session.close().await
         .context("Failed to close SSH session - probably fine.")?;
 
     // Return as successful
-    Ok(ret)
+    Ok(stderr.is_empty())
 }
 pub type PBSId = String;
 pub async fn metis_qsub (
@@ -73,9 +77,10 @@ pub async fn metis_qsub (
         .context("Failed to close SSH session - probably fine.")?;
 
     // Treat any error output as fatal
-    if stderr.len() > 0 {
+    if !stderr.is_empty() {
         bail!("Server had `stderr`: {stderr}");
     }
+
     // Return as successful
     Ok(stdout.trim().into())
 }
